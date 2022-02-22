@@ -101,7 +101,13 @@ unit Sealtest;
               (from peak or exponential amplitude) option setting now preserved in INI file and can be set
               by .SealTestGaFromPeak Active X command. No. of cell parameter measurements averaged can now be set by
               .SealTestNumAverages command. Ga,Gm,Cm etc. now displayed as 0 if no data available.
-  17.06.19    Copied to WinEDR from WinWCP
+  26.07.21 .. When a test pulse is sent to additional output channels using the Send Test To check boxes
+              the test pulse is applied from the default holding potential or current for that channel
+              (not the dieplayed VHold level for the currently selected amplifier
+              Channels not associated with selected amplifier hidden in display except when stimulus routed to additional AO channels.
+  04.08.21 .. Test pulse rate speeded up by only updating test pulse waveform when required and by changes to NIDAQMXunit to make
+              ADCToMemory() more efficient.
+  18.08.21 .. Display All Channels tick option added to display. Tecella Triton channels can now be selected individually for display
 
   ==================================================}
 
@@ -119,7 +125,6 @@ const
     EndofSweep = 3 ;
     MaxAverage = 100 ;
 type
-  //TState = ( Idle, StartSweep, SweepInProgress, EndofSweep ) ;
 
   TTestPulse = record
                Duration : single ;
@@ -183,7 +188,6 @@ type
     GroupBox2: TGroupBox;
     rbGaFromPeak: TRadioButton;
     rbGaFromExp: TRadioButton;
-    ckAutoScale: TCheckBox;
     edPulseheight3: TValidatedEdit;
     Label20: TLabel;
     cbAmplifier: TComboBox;
@@ -198,7 +202,6 @@ type
     ckPulseToAO2: TCheckBox;
     ckPulseToAO3: TCheckBox;
     ChannelsGrp: TGroupBox;
-    cbNumChannels: TComboBox;
     Label10: TLabel;
     CellRTab: TTabSheet;
     Label18: TLabel;
@@ -216,6 +219,11 @@ type
     Label23: TLabel;
     Label24: TLabel;
     bResetAverage: TButton;
+    pnDisplayOptions: TPanel;
+    ckAutoScale: TCheckBox;
+    ckDisplayAllChannels: TCheckBox;
+    edNumChannels: TValidatedEdit;
+    udNumChannels: TUpDown;
     procedure TimerTimer(Sender: TObject);
     procedure FormShow(Sender: TObject);
     procedure edHoldingVoltage1KeyPress(Sender: TObject; var Key: Char);
@@ -244,13 +252,16 @@ type
     procedure cbAmplifierChange(Sender: TObject);
     procedure rbVclampClick(Sender: TObject);
     procedure rbIclampClick(Sender: TObject);
-    procedure cbNumChannelsChange(Sender: TObject);
     procedure edNumAveragesKeyPress(Sender: TObject; var Key: Char);
     procedure FormCreate(Sender: TObject);
     procedure bzapClick(Sender: TObject);
     procedure edZapAmplitudeKeyPress(Sender: TObject; var Key: Char);
     procedure edZapDurationKeyPress(Sender: TObject; var Key: Char);
     procedure bResetAverageClick(Sender: TObject);
+    procedure ckPulseToAO0Click(Sender: TObject);
+    procedure ckDisplayAllChannelsClick(Sender: TObject);
+    procedure edNumChannelsKeyPress(Sender: TObject; var Key: Char);
+    procedure udNumChannelsClick(Sender: TObject; Button: TUDBtnType);
   private
     { Private declarations }
   Initialised : Boolean ;
@@ -260,6 +271,7 @@ type
   ChangeDisplayScaling : Boolean ;
   EndOfSweepCount : Integer ;
   FirstSweep : Boolean ;
+  NewTestPulse : Boolean ;
   ResetReadout : Boolean ;
   NumTestChannels : Integer ;
   TestPulse : TTestPulse ;
@@ -317,6 +329,7 @@ type
           OldAverage : single      // Previous avg. (returned when NumAverage = 0)
           ) : single ;
 
+    procedure ShowAmplifierChannels ;
 
   public
     { Public declarations }
@@ -421,14 +434,22 @@ begin
      cbAmplifier.ItemIndex := 0 ;
 
      // No. of display channels
-     NumTestChannels := 2 ;
-     for i := 1 to MaxAmplifiers-1 do if Amplifier.AmplifierType[i] <> amNone then
-        NumTestChannels := NumTestChannels + 2 ;
-     cbNumChannels.Clear ;
+     NumTestChannels := 0 ;
+     for i := 0 to MaxAmplifiers-1 do
+         begin
+         if Amplifier.AmplifierType[i] = amTriton then NumTestChannels := Main.SESLabIO.ADCMaxChannels
+         else if Amplifier.AmplifierType[i] <> amNone then NumTestChannels := NumTestChannels + 2 ;
+         end;
+     NumTestChannels := Max(NumTestChannels,2) ;
+
+{     cbNumChannels.Clear ;
      for i := 1 to Main.SESLabIO.ADCMaxChannels do begin
          cbNumChannels.Items.Add(format(' %d',[i]));
          end ;
-     cbNumChannels.ItemIndex := NumTestChannels-1 ;
+     cbNumChannels.ItemIndex := NumTestChannels-1 ;}
+     edNumChannels.LoLimit := 1.0 ;
+     edNumChannels.HiLimit := Main.SESLabIO.ADCMaxChannels ;
+     edNumChannels.Value := NumTestChannels ;
 
      scDisplay.ClearHorizontalCursors ;
      scDisplay.MaxADCValue := Main.SESLabIO.ADCMaxValue ;
@@ -506,6 +527,7 @@ begin
 
      Timer.Enabled := True ;
      TimerBusy := False ;
+     NewTestPulse := True ;
      ResetReadout := True ;
      FirstSweep := True ;
      State := idle ;//StartSweep ;
@@ -519,12 +541,16 @@ begin
      edCMembrane.Value := 0.0 ;
      edRMembrane.Value := 0.0 ;
 
-
      // Clear display
      InitialiseDisplay ;
-     for ch := 0 to scDisplay.NumChannels-1 do begin
+
+  {   for ch := 0 to scDisplay.NumChannels-1 do
+         begin
          scDisplay.ChanVisible[ch] := Main.SESLabIO.ADCChannelVisible[ch] ;
-         end ;
+         end ;}
+
+     // Show channels for this amplifier
+     ShowAmplifierChannels ;
 
      Resize ;
      State := StartSweep ;
@@ -543,7 +569,8 @@ begin
      { Fill current & voltage channel selection combo boxes }
      cbCurrentChannel.Clear ;
      cbVoltageChannel.Clear ;
-     for ch := 0 to NumTestChannels-1 do begin
+     for ch := 0 to NumTestChannels-1 do
+         begin
          cbCurrentChannel.Items.Add(format('Ch.%d %s',
                                     [ch,Main.SESLabIO.ADCChannelName[ch]]));
          cbVoltageChannel.Items.Add(format('Ch.%d %s',
@@ -553,7 +580,8 @@ begin
      cbVoltageChannel.ItemIndex := Max(1,NumTestChannels-1) ;
 
      // Set
-     for ch := NumTestChannels-1 downto 0 do begin
+     for ch := NumTestChannels-1 downto 0 do
+         begin
          // Current channel (units = pA,nA,uA)
          if ANSIContainsText(Main.SESLabIO.ADCChannelUnits[ch],'A') then
             cbCurrentChannel.ItemIndex := ch ;
@@ -562,8 +590,25 @@ begin
             cbVoltageChannel.ItemIndex := ch ;
          end ;
 
+     // Show channels for this amplifier
+     ShowAmplifierChannels ;
+
      end ;
 
+
+procedure TSealTestFrm.udNumChannelsClick(Sender: TObject; Button: TUDBtnType);
+// ---------------------------------------------
+// No. Channels displayed up/donw button clicked
+// ---------------------------------------------
+begin
+    if Button =  btNext then edNumChannels.Value := edNumChannels.Value + 1.0
+                        else edNumChannels.Value := edNumChannels.Value - 1.0 ;
+
+    NumTestChannels := Round(edNumChannels.Value) ;
+    UpdateChannelLists ;
+    ShowAmplifierChannels ;
+
+end;
 
 procedure TSealTestFrm.TimerTimer(Sender: TObject);
 { ---------------------
@@ -571,7 +616,7 @@ procedure TSealTestFrm.TimerTimer(Sender: TObject);
   ---------------------}
 
 var
-   ch,T : Integer ;
+   ch,T,t1,t2 : Integer ;
    OldADCUnits : Array[0..MaxChannels-1] of String ;
    OldADCName : Array[0..MaxChannels-1] of String ;
    Changed : Boolean ;
@@ -583,18 +628,18 @@ begin
      if not TimerBusy then begin
           TimerBusy := True ;
 
-          if LoadEPC9Panel then begin
-               Main.mnEPC9Panel.Enabled := True ;
-                Main.mnEPC9Panel.Click ;
-                LoadEPC9Panel := False ;
-                end ;
+          if LoadEPC9Panel then
+             begin
+             Main.mnEPC9Panel.Enabled := True ;
+             Main.mnEPC9Panel.Click ;
+             LoadEPC9Panel := False ;
+             end ;
+
           case State of
 
                StartSweep : Begin
 //                   if t0 = 0 then t0 := timegettime;
 //                   t0max := Max(timegettime-t0,t0max) ;
-//                   outputdebugstring(pchar(format('%d %d',[timegettime-t0, t0max])));
-//                   t0 := timegettime ;
 
                    { Start recording sweep(s) }
 
@@ -604,13 +649,16 @@ begin
                       Settings.SealTest.VoltageChannel := cbVoltageChannel.ItemIndex ;
 
                    // Save old channel units
-                   for ch := 0 to NumTestChannels-1 do begin
+                   for ch := 0 to NumTestChannels-1 do
+                       begin
                        OldADCUnits[ch] := Main.SESLabIO.ADCChannelUnits[ch] ;
                        OldADCName[ch] := Main.SESLabIO.ADCChannelName[ch] ;
                        end ;
 
+
                    // Update channel scaling factors in case amplifier gain has changed
-                   for ch := 0 to NumTestChannels-1 do begin
+                   for ch := 0 to NumTestChannels-1 do
+                       begin
                        Name := Main.SESLabIO.ADCChannelName[ch] ;
                        Units := Main.SESLabIO.ADCChannelUnits[ch] ;
                        VPU := Main.SESLabIO.ADCChannelVoltsPerUnit[ch] ;
@@ -626,7 +674,8 @@ begin
 
                    // If units have changed, update current/voltage channels
                    Changed := False ;
-                   for ch := 0 to NumTestChannels-1 do begin
+                   for ch := 0 to NumTestChannels-1 do
+                       begin
                        if OldADCUnits[ch] <> Main.SESLabIO.ADCChannelUnits[ch] then Changed := True ;
                        if OldADCName[ch] <> Main.SESLabIO.ADCChannelName[ch] then Changed := True ;
                        end ;
@@ -634,16 +683,16 @@ begin
 
                    // Update Amplifier #1 gain display
 
+
+
+
 //                   ich := cbCurrentChannel.ItemIndex ;
                    if ClampMode[cbAmplifier.ItemIndex] <>
                       Amplifier.ClampMode[cbAmplifier.ItemIndex] then SetClampMode ;
 
                    // Update current gain (if telegraphs available)
-                   if Amplifier.GainTelegraphAvailable[cbAmplifier.ItemIndex] or
-                      NewAmplifierGain then begin
-                      // Display current amplifier gain
-//                      if Main.SESLabIO.LabInterfaceType = Triton then iCh := 1
-//                                                                 else iCh := 0 ;
+                   if Amplifier.GainTelegraphAvailable[cbAmplifier.ItemIndex] or NewAmplifierGain then
+                      begin
                       edAmplifierGain.Units := 'V/' + Amplifier.PrimaryChannelUnits[cbAmplifier.ItemIndex,ClampMode[cbAmplifier.ItemIndex]] ;
                       edAmplifierGain.Value := Amplifier.PrimaryChannelScaleFactor[cbAmplifier.ItemIndex] ;
                       NewAmplifierGain := False ;
@@ -663,7 +712,13 @@ begin
 
                    Main.SESLabIO.ADCCircularBuffer := False ;
 
-                   CreateTestPulse ;
+                   // Create test pulse
+                   if NewTestPulse then
+                      begin
+                      CreateTestPulse ;
+                      NewTestPulse := False ;
+                      ResetReadout := True ;
+                      end;
 
                    { Start D/A waveform output }
                    Main.SESLabIO.DACNumChannels := Main.SESLabIO.DACMaxChannels ;
@@ -672,9 +727,15 @@ begin
                    EndOfSweepCount := 0 ;
 
                    Main.SESLabIO.ADCStart ;
+
                    Main.SESLabIO.DACStart ;
+
                    if Main.SESLabIO.ADCActive then State := SweepInProgress
                                               else State := Idle ;
+
+//                   outputdebugstring(pchar(format('%d %d',[timegettime-t0, t2])));
+//                   t0 := timegettime ;
+
                    End ;
 
                SweepInProgress : Begin
@@ -733,6 +794,7 @@ procedure TSealTestFrm.SetClampMode ;
 var
     Units : String ;
     Scale : Single ;
+  ch: Integer;
 begin
 
     ClampMode[cbAmplifier.ItemIndex] := Amplifier.ClampMode[cbAmplifier.ItemIndex] ;
@@ -740,13 +802,15 @@ begin
     cbCurrentChannel.ItemIndex := Amplifier.CurrentChannel[cbAmplifier.ItemIndex] ;
     cbVoltageChannel.ItemIndex := Amplifier.VoltageChannel[cbAmplifier.ItemIndex] ;
 
-    If ClampMode[cbAmplifier.ItemIndex] = amCurrentClamp then begin
+    If ClampMode[cbAmplifier.ItemIndex] = amCurrentClamp then
+       begin
        rbIClamp.Checked := True ;
        Units := CurrentClampUnits ;
        Scale := CurrentClampScale*Amplifier.CommandScaleFactor[cbAmplifier.ItemIndex] ;
        SetPulseOutChannel( Amplifier.CurrentCommandChannel[cbAmplifier.ItemIndex] ) ;
        end
-    else begin
+    else
+       begin
        rbVClamp.Checked := True ;
        Units := VoltageClampUnits ;
        Scale := VoltageClampScale*Amplifier.CommandScaleFactor[cbAmplifier.ItemIndex] ;
@@ -779,6 +843,33 @@ begin
               end ;
           end ;
 
+
+    end ;
+
+procedure TSealTestFrm.ShowAmplifierChannels ;
+// ------------------------------------------------------------
+// Display channels for current selected amplifier, hide others
+// ------------------------------------------------------------
+var
+    iAmp : Integer ;
+    IsVisible : Boolean ;
+  ch: Integer;
+begin
+{    for iAmp := 0 to cbAmplifier.Items.Count-1 do
+        begin
+        if Amplifier.AmplifierType[iAmp] = amNone then IsVisible := True
+                                                  else IsVisible := OutChannelSelected(iAmp) ;
+        scDisplay.ChanVisible[Amplifier.CurrentChannel[iAmp]] := IsVisible ;
+        scDisplay.ChanVisible[Amplifier.VoltageChannel[iAmp]] := IsVisible ;
+        end;}
+
+    for ch := 0 to scDisplay.NumChannels-1 do
+        begin
+        if (cbCurrentChannel.ItemIndex = ch) or
+           (cbVoltageChannel.ItemIndex = ch) or
+           ckDisplayallChannels.Checked then scDisplay.ChanVisible[ch] := True
+                                        else scDisplay.ChanVisible[ch] := False ;
+        end;
     end ;
 
 
@@ -832,6 +923,25 @@ begin
     end ;
 
 
+procedure TSealTestFrm.ckDisplayAllChannelsClick(Sender: TObject);
+// -------------------------------------
+// Display All Channels tick box changed
+// -------------------------------------
+begin
+    ShowAmplifierChannels ;
+end;
+
+
+procedure TSealTestFrm.ckPulseToAO0Click(Sender: TObject);
+// --------------------------------
+// Output channel selection clicked
+// -------------------------------
+begin
+    ShowAmplifierChannels ;
+    NewTestPulse := True ;
+    end;
+
+
 procedure TSealTestFrm.InitialiseDisplay ;
 // ---------------------------------
 // Setup oscilloscope display window
@@ -846,7 +956,8 @@ begin
      //scDisplay.xMax := NumTestSamples-1 ;
      //scDisplay.xMin := 0 ;
      { Set channel information }
-     for ch := 0 to NumTestChannels-1 do begin
+     for ch := 0 to NumTestChannels-1 do
+         begin
          scDisplay.ChanOffsets[ch] := Main.SESLabIO.ADCChannelOffset[ch] ;
          scDisplay.ChanUnits[ch] := Main.SESLabIO.ADCChannelUnits[ch] ;
          scDisplay.ChanScale[ch] := Main.SESLabIO.ADCChannelUnitsPerBit[ch] ;
@@ -864,7 +975,6 @@ procedure TSealTestFrm.CreateTestPulse ;
   ----------------------------}
 var
    i,j,ch,iStart,iEnd,iOffLevel,iOnLevel : Integer ;
-   HoldDACLevel : Array[0..MaxAmplifiers-1] of Integer ;
 begin
 
      { Select test pulse to use }
@@ -883,19 +993,22 @@ begin
               end ;
           end ;
 
-     if not bZap.Enabled then begin
+     if not bZap.Enabled then
+        begin
         Settings.SealTest.PulseHeight := edZapAmplitude.Value ;
         end;
 
      { D/A channel voltage -> bits scaling factors }
-     for ch := 0 to Main.SESLabIO.DACMaxChannels-1 do begin
+     for ch := 0 to Main.SESLabIO.DACMaxChannels-1 do
+         begin
          DACScale[ch] := Main.SESLabIO.DACMaxValue/Main.SESLabIO.DACVoltageRange[ch] ;
          end ;
 
      { Test pulse duration and recording sweep length }
      TestPulse.Duration := Settings.SealTest.PulseWidth ;
 
-     if not bZap.Enabled then begin
+     if not bZap.Enabled then
+        begin
         TestPulse.Duration := edZapDuration.Value ;
         bZap.Enabled := True ;
         end;
@@ -927,32 +1040,25 @@ begin
      iStart := Max(Round(TestPulse.TStart/DACdt),1 ) ;
      iEnd := Max(Round(TestPulse.TEnd/DACdt),1 ) ;
 
-     // Seal test On and off pulse levels for selected DAC output
-     iOffLevel := Max(Main.SESLabIO.DACMinValue,
-                  Min(Main.SESLabIO.DACMaxValue,Round(DACScale[TestDAC]*
-                  Main.SESLabIO.DACHoldingVoltage[TestDAC]))) ;
-     iOnLevel :=  Max(Main.SESLabIO.DACMinValue,
-                  Min(Main.SESLabIO.DACMaxValue,Round(DACScale[TestDAC]*
-                  (Main.SESLabIO.DACHoldingVoltage[TestDAC] + Settings.SealTest.PulseHeight)))) ;
+     for ch := 0 to Main.SESLabIO.DACNumChannels-1 do
+         begin
+         // Holding level
+         iOffLevel := Max(Main.SESLabIO.DACMinValue,Min(Main.SESLabIO.DACMaxValue,
+                      Round(DACScale[ch]*Main.SESLabIO.DACHoldingVoltage[ch]))) ;
+         // Test level
+         iOnLevel :=  Max(Main.SESLabIO.DACMinValue,Min(Main.SESLabIO.DACMaxValue,
+                      Round(DACScale[ch]*(Main.SESLabIO.DACHoldingVoltage[ch] + Settings.SealTest.PulseHeight)))) ;
 
-     // Set holding levels
-     for ch := 0 to Main.SESLabIO.DACMaxChannels-1 do begin
-         HoldDACLevel[ch] := Max(Main.SESLabIO.DACMinValue,
-                             Min(Main.SESLabIO.DACMaxValue,Round(
-                             Main.SESLabIO.DACHoldingVoltage[ch]*DACScale[ch]))) ;
-         end ;
-
-     // Create DAC waveform buffer
-     j := 0 ;
-     for i := 0 to nDacValues-1 do begin
-         // Seal test DAC channel
-         for ch := 0 to Main.SESLabIO.DACMaxChannels-1 do begin
+         // Create DAC waveform buffer
+         j := ch ;
+         for i := 0 to nDacValues-1 do
+             begin
              if OutChannelSelected(ch) then begin
                 if (i >= iStart) and (i<iEnd) then DAC^[j] := iOnLevel
                                               else DAC^[j] := iOffLevel ;
                 end
-             else  DAC^[j] := HoldDACLevel[ch] ;
-             Inc(j) ;
+             else  DAC^[j] := iOffLevel ;
+             j := j + Main.SESLabIO.DACNumChannels ;
              end ;
          end ;
 
@@ -1326,14 +1432,14 @@ begin
      ChangeDisplayGrid ;
 
      // Stop record form if it is open
-     if Main.FormExists( 'RecordFrm') then RecordFrm.StopADCandDAC ;
+     if Main.FormExists( 'RecordFrm') then RecordFrm.StopADCAndDAC ;
 
      { Start seal test pulses when form gains focus }
 
      Timer.enabled := True ;
      TimerBusy := False ;
      State := StartSweep ;
-     ResetReadout := True ;
+     NewTestPulse := True ;
 
      end;
 
@@ -1346,7 +1452,7 @@ procedure TSealTestFrm.edHoldingVoltage1KeyPress(Sender: TObject; var Key: Char)
 begin
      if key = #13 then begin
          Settings.SealTest.HoldingVoltage1 := edHoldingVoltage1.Value ;
-        ResetReadout := True ;
+        NewTestPulse := True ;
         end ;
 
      end;
@@ -1359,7 +1465,7 @@ procedure TSealTestFrm.edHoldingVoltage2KeyPress(Sender: TObject; var Key: Char)
 begin
      if key = #13 then begin
         Settings.SealTest.HoldingVoltage2 := edHoldingVoltage2.Value ;
-        ResetReadout := True ;
+        NewTestPulse := True ;
         end ;
 
      end;
@@ -1373,7 +1479,7 @@ procedure TSealTestFrm.EdHoldingVoltage3KeyPress(Sender: TObject;
 begin
      if key = #13 then begin
         Settings.SealTest.HoldingVoltage3 := edHoldingVoltage3.Value ;
-        ResetReadout := True ;
+        NewTestPulse := True ;
         end ;
      end ;
 
@@ -1387,6 +1493,7 @@ begin
      Settings.SealTest.Use := 1 ;
      Settings.SealTest.HoldingVoltage1 := edHoldingVoltage1.Value ;
      Settings.SealTest.PulseHeight1 := edPulseHeight1.Value ;
+     NewTestPulse := True ;
      end;
 
 
@@ -1399,6 +1506,7 @@ begin
      Settings.SealTest.Use := 2 ;
      Settings.SealTest.HoldingVoltage2 := edHoldingVoltage2.Value ;
      Settings.SealTest.PulseHeight2 := edPulseHeight2.Value ;
+     NewTestPulse := True ;
      end;
 
 
@@ -1412,6 +1520,7 @@ begin
      Settings.SealTest.Use := 3 ;
      Settings.SealTest.HoldingVoltage3 := edHoldingVoltage3.Value ;
      Settings.SealTest.PulseHeight3 :=edPulseHeight3.Value ;
+     NewTestPulse := True ;
      end;
 
 
@@ -1421,9 +1530,9 @@ procedure TSealTestFrm.edPulseHeight1KeyPress(Sender: TObject;
   Set test pulse amplitude #1
   -------------------------------}
 begin
-     if key = char(13) then begin
+     if key = #13 then begin
         Settings.SealTest.PulseHeight1 := edPulseHeight1.Value ;
-        ResetReadout := True ;
+        NewTestPulse := True ;
         end ;
      end;
 
@@ -1434,9 +1543,9 @@ procedure TSealTestFrm.edPulseheight2KeyPress(Sender: TObject;
     Set test pulse amplitude #2
     -----------------------------}
 begin
-     if key = char(13) then begin
+     if key = #13 then begin
         Settings.SealTest.PulseHeight2 := edPulseHeight2.Value ;
-        ResetReadout := True ;
+        NewTestPulse := True ;
         end ;
      end;
 
@@ -1454,7 +1563,7 @@ begin
         scDisplay.xMax := NumTestSamples-1 ;
         scDisplay.xMin := 0 ;
         State := StartSweep ;
-        ResetReadout := True ;
+        NewTestPulse := True ;
         end ;
      end ;
 
@@ -1548,9 +1657,9 @@ begin
      CellGrp.Top := VoltsGrp.Top ;
      ZapGrp.Top := VoltsGrp.Top ;
 
-     ckAutoScale.Top := VoltsGrp.Top - ckAutoScale.Height - 5 ;
+     pnDisplayoptions.Top := VoltsGrp.Top - pnDisplayoptions.Height - 5 ;
      scDisplay.Width := Max(ClientWidth - scDisplay.Left - 5,2) ;
-     scDisplay.Height := Max( ckAutoScale.Top - scDisplay.Top - 2,2) ;
+     scDisplay.Height := Max( pnDisplayoptions.Top - scDisplay.Top - 2,2) ;
 
      //State := StartSweep ;
      StartADCandDAC ;
@@ -1596,7 +1705,7 @@ procedure TSealTestFrm.bResetAverageClick(Sender: TObject);
 // Reset averaging for pipette reistance/capacity readout
 // ------------------------------------------------------
 begin
-    ResetReadout := True ;
+    NewTestPulse := True ;
 end;
 
 
@@ -1609,7 +1718,8 @@ begin
 
 procedure TSealTestFrm.cbCurrentChannelChange(Sender: TObject);
 begin
-     ResetReadout := True ;
+     NewTestPulse := True ;
+     ShowAmplifierChannels ;
      end;
 
 procedure TSealTestFrm.bSaveToLogClick(Sender: TObject);
@@ -1640,6 +1750,7 @@ begin
     bZap.Enabled := False ;
     end;
 
+
 procedure TSealTestFrm.edAmplifierGainKeyPress(Sender: TObject;
   var Key: Char);
 begin
@@ -1648,13 +1759,14 @@ begin
         end ;
      end;
 
+
 procedure TSealTestFrm.rbGaFromPeakClick(Sender: TObject);
 // ----------------------------------------------------
 // Select Ga calculated from capacity current peak mode
 // ----------------------------------------------------
 begin
      Settings.SealTest.GaFromPeak := True ;
-     ResetReadout := True ;
+     NewTestPulse := True ;
      end;
 
 procedure TSealTestFrm.rbGaFromExpClick(Sender: TObject);
@@ -1663,7 +1775,7 @@ procedure TSealTestFrm.rbGaFromExpClick(Sender: TObject);
 // ----------------------------------------------------
 begin
      Settings.SealTest.GaFromPeak := False ;
-     ResetReadout := True ;
+     NewTestPulse := True ;
      end;
 
 
@@ -1681,7 +1793,7 @@ begin
             Settings.SealTest.PulseHeight1 := Value ;
            if rbUseHoldingVoltage1.checked then begin
               Settings.SealTest.PulseHeight := edPulseHeight1.Value ;
-              ResetReadout := True ;
+              NewTestPulse := True ;
               end ;
            end ;
 
@@ -1690,7 +1802,7 @@ begin
             Settings.SealTest.PulseHeight2 := Value ;
            if rbUseHoldingVoltage2.checked then begin
               Settings.SealTest.PulseHeight := edPulseHeight2.Value ;
-              ResetReadout := True ;
+              NewTestPulse := True ;
               end ;
             end ;
         end ;
@@ -1721,7 +1833,7 @@ begin
             Settings.SealTest.HoldingVoltage1 := Value ;
             if rbUseHoldingVoltage1.checked then begin
                Main.SESLabIO.DACHoldingVoltage[TestDAC] := edHoldingVoltage1.Value ;
-               ResetReadout := True ;
+               NewTestPulse := True ;
                end ;
             end ;
 
@@ -1730,7 +1842,7 @@ begin
             Settings.SealTest.HoldingVoltage2 := Value ;
             if rbUseHoldingVoltage1.checked then begin
                Main.SESLabIO.DACHoldingVoltage[TestDAC] := edHoldingVoltage2.Value ;
-               ResetReadout := True ;
+               NewTestPulse := True ;
                end ;
             end ;
         3 : begin
@@ -1738,7 +1850,7 @@ begin
             Settings.SealTest.HoldingVoltage3 := Value ;
             if rbUseHoldingVoltage1.checked then begin
                Main.SESLabIO.DACHoldingVoltage[TestDAC] := edHoldingVoltage3.Value ;
-               ResetReadout := True ;
+               NewTestPulse := True ;
                end ;
             end ;
         end ;
@@ -1834,12 +1946,12 @@ procedure TSealTestFrm.edPulseheight3KeyPress(Sender: TObject;
     Set test pulse amplitude #3
     -----------------------------}
 begin
-     if key = char(13) then begin
+     if key = #13 then begin
         Settings.SealTest.PulseHeight3 := edPulseHeight3.Value ;
         if rbUseHoldingVoltage3.checked then begin
            Settings.SealTest.PulseHeight := edPulseHeight3.Value ;
            end ;
-        ResetReadout := True ;
+        NewTestPulse := True ;
         end ;
      end;
 
@@ -1863,6 +1975,7 @@ procedure TSealTestFrm.cbAmplifierChange(Sender: TObject);
 begin
      SetClampMode ;
      NewAmplifierGain := True ;
+     ShowAmplifierChannels ;
      end;
 
 procedure TSealTestFrm.rbVclampClick(Sender: TObject);
@@ -1890,15 +2003,6 @@ begin
         end ;
      end ;
 
-procedure TSealTestFrm.cbNumChannelsChange(Sender: TObject);
-// --------------------------------
-// No. of display channels changed
-// --------------------------------
-begin
-     NumTestChannels := Max( cbNumChannels.ItemIndex + 1,1) ;
-     UpdateChannelLists ;
-     end;
-
 
 procedure TSealTestFrm.edNumAveragesKeyPress(Sender: TObject;
   var Key: Char);
@@ -1907,6 +2011,20 @@ begin
        Settings.SealTest.NumAverages := Round(edNumAverages.Value)
        end ;
      end;
+
+
+procedure TSealTestFrm.edNumChannelsKeyPress(Sender: TObject; var Key: Char);
+// ---------------------------------
+// No. of displayed channels changed
+// ---------------------------------
+begin
+    if Key = #13 then
+       begin
+       NumTestChannels := Round(edNumChannels.Value) ;
+       UpdateChannelLists ;
+       ShowAmplifierChannels ;
+       end;
+    end;
 
 procedure TSealTestFrm.edZapAmplitudeKeyPress(Sender: TObject; var Key: Char);
 // ---------------------

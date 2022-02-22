@@ -403,8 +403,14 @@ unit Mdiform;
   V3.9.4  05.05.21 Event Detector: Bug which caused event detection point to be slightly misaligned from mid-point of rise for multi-channel recordings fixed
   V3.9.5  03.06.21 Event Detector: Events can now be aligned by either max. rate of rise or mid-point of rise.
                    Save to File added to Edit menu, allowed displayed signals/plots to be saved to as CSV file
-
-
+  V3.9.6  09.08.21 AmpModule.pas copied from WinWCP. Axoclamp 900A module updated (not tested yet with actual hardware
+                   Sealtest.pas imported from WinWCP, Pulse rate now faster. Default holding potential for AO channels selected by tick now updated.
+  V3.9.7  27.08.21 Support for Tecella Triton X (16 channel patch clamp) added
+  V3.9.8  24.11.21 Support for CED Micro 1401 Mk4 added. Digital stimulus pulses now work in Record To Disk window
+                   Stimulus protocol files now correctly listed in Save/Open dialog boxes of protocol editor
+  V3.9.9  16.01.22 COM Automation controls now working correctly again
+  V4.0.0  06.02.22 Event Detector; Misalignment of mid-point of rise no longer misaligned for high frequency events
+                   Event alignment point can now be left at detection point
   =======================================================================}
 
 interface
@@ -644,7 +650,7 @@ var
    i,ch : Integer ;
    FileName : String ;
 begin
-     Version := 'V3.9.5' ;
+     Version := 'V4.0.0' ;
      Caption := 'WinEDR - Strathclyde Electrophysiology Data Recorder ' + Version ;
 
       { Get directory which contains EDR program }
